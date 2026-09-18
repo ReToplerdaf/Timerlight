@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <AssemblyName>Timerlight</AssemblyName>
+    <RootNamespace>Timerlight</RootNamespace>
+    <Product>Timerlight</Product>
+    <AssemblyTitle>Timerlight</AssemblyTitle>
+    <Description>Tray hourglass that shows how long you have been sitting at the computer.</Description>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>Assets\timerlight.ico</ApplicationIcon>
+
+    <!-- Lets the project be built from Linux/macOS CI as well as from Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <!-- Reflection-based JSON settings are used, so trimming stays off. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>embedded</DebugType>
+
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
+  </PropertyGroup>
+
+</Project>

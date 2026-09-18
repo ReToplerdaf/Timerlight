@@ -1,0 +1,11 @@
+# .NET build output
+bin/
+obj/
+publish/
+*.user
+*.suo
+.vs/
+
+# Python bytecode from the asset generators
+__pycache__/
+*.pyc
