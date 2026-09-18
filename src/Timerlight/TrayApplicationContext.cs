@@ -7,13 +7,31 @@ namespace Timerlight;
 /// Owns the notification-area icon: it counts the current sitting, repaints the hourglass,
 /// and reacts to clicks, idle time, lock and sleep.
 /// </summary>
+/// <remarks>
+/// Two different spans are shown at once. The colour of the sand tracks the whole interval,
+/// usually an hour, walking from green to red. The sand itself pours over a much shorter
+/// stretch - ten minutes by default - and the glass is turned over each time that stretch
+/// runs out, so the icon keeps moving instead of sitting still for an hour.
+/// </remarks>
 internal sealed class TrayApplicationContext : ApplicationContext
 {
-    private const int TickIntervalMilliseconds = 500;
+    private const int MinuteMilliseconds = 60_000;
+
+    // Everything is quantised to whole minutes, so one tick a minute is all the widget needs
+    // to stay current. Blinking and the turn-over are the only things that ask for more.
+    private const int BlinkIntervalMilliseconds = 600;
+
+    // Ticks are aimed just past a minute boundary. Landing exactly on it would let
+    // (int)Elapsed.TotalMinutes read one minute short and hold the sand back a whole minute.
+    private const int TickGuardMilliseconds = 50;
+    private const int FlipFrameIntervalMilliseconds = 35;
+    private const int FlipFrameCount = 14;
+
     private const float BlinkDimOpacity = 0.22f;
     private const int MaxTooltipLength = 63;
 
     private static readonly int[] IntervalPresets = [15, 30, 45, 60, 90, 120];
+    private static readonly int[] FlipPresets = [0, 5, 10, 15, 20, 30];
     private static readonly int[] IdlePresets = [0, 5, 10, 15, 30];
     private static readonly TimeSpan ThemeRefreshInterval = TimeSpan.FromSeconds(20);
 
@@ -21,10 +39,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly ContextMenuStrip _menu;
     private readonly System.Windows.Forms.Timer _timer;
+    private readonly System.Windows.Forms.Timer _flipTimer;
     private readonly Stopwatch _sitting = new();
 
     private readonly ToolStripMenuItem _pauseItem;
     private readonly ToolStripMenuItem _intervalItem;
+    private readonly ToolStripMenuItem _flipItem;
     private readonly ToolStripMenuItem _idleItem;
     private readonly ToolStripMenuItem _blinkItem;
     private readonly ToolStripMenuItem _notificationItem;
@@ -45,6 +65,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _targetAnnounced;
     private bool _lightBackground = true;
     private DateTime _themeCheckedAt = DateTime.MinValue;
+    private int _lastSegment;
+    private int _flipFrame;
     private bool _disposed;
 
     internal TrayApplicationContext()
@@ -53,6 +75,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _pauseItem = new ToolStripMenuItem("Пауза", null, (_, _) => TogglePause()) { CheckOnClick = false };
         _intervalItem = new ToolStripMenuItem("Интервал");
+        _flipItem = new ToolStripMenuItem("Переворот часов");
         _idleItem = new ToolStripMenuItem("Сброс при бездействии");
         _blinkItem = new ToolStripMenuItem("Мигать по достижении", null, (_, _) => ToggleBlink());
         _notificationItem = new ToolStripMenuItem("Показывать уведомление", null, (_, _) => ToggleNotification());
@@ -61,6 +84,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _autostartItem = new ToolStripMenuItem("Запускать вместе с Windows", null, (_, _) => ToggleAutostart());
 
         BuildIntervalMenu();
+        BuildFlipMenu();
         BuildIdleMenu();
 
         var resetItem = new ToolStripMenuItem("Сбросить таймер", null, (_, _) => ResetSitting())
@@ -75,6 +99,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _pauseItem,
             new ToolStripSeparator(),
             _intervalItem,
+            _flipItem,
             _idleItem,
             new ToolStripSeparator(),
             _blinkItem,
@@ -101,12 +126,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
+        _timer = new System.Windows.Forms.Timer { Interval = MinuteMilliseconds };
+        _timer.Tick += (_, _) => Refresh();
+
+        _flipTimer = new System.Windows.Forms.Timer { Interval = FlipFrameIntervalMilliseconds };
+        _flipTimer.Tick += (_, _) => OnFlipTick();
+
         _sitting.Start();
         RefreshTheme(force: true);
         Refresh();
-
-        _timer = new System.Windows.Forms.Timer { Interval = TickIntervalMilliseconds };
-        _timer.Tick += (_, _) => Refresh();
         _timer.Start();
     }
 
@@ -114,18 +142,49 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private TimeSpan Elapsed => _sitting.Elapsed;
 
-    private TimeSpan Target => TimeSpan.FromMinutes(Math.Max(_settings.TargetMinutes, AppSettings.MinTargetMinutes));
+    /// <summary>Whole minutes of the current sitting. Ticks land just after a minute rolls over.</summary>
+    private int ElapsedMinutes => (int)Elapsed.TotalMinutes;
 
-    private double Progress => Math.Clamp(Elapsed.TotalSeconds / Target.TotalSeconds, 0d, 1d);
+    private int TargetMinutes => Math.Max(_settings.TargetMinutes, AppSettings.MinTargetMinutes);
 
-    /// <summary>One pass: apply the idle rule, advance the blink, repaint and relabel.</summary>
+    private TimeSpan Target => TimeSpan.FromMinutes(TargetMinutes);
+
+    private bool FlipEnabled => _settings.FlipMinutes > 0;
+
+    /// <summary>How long one pour lasts before the glass is turned over.</summary>
+    private int SegmentMinutes => FlipEnabled
+        ? Math.Min(_settings.FlipMinutes, TargetMinutes)
+        : TargetMinutes;
+
+    /// <summary>Drives the colour: how far the whole interval has got.</summary>
+    private double ColorProgress => Math.Clamp(ElapsedMinutes / (double)TargetMinutes, 0d, 1d);
+
+    private bool IsFinished => ElapsedMinutes >= TargetMinutes;
+
+    /// <summary>Drives the sand level: how far the current pour has got.</summary>
+    private double SandProgress
+    {
+        get
+        {
+            if (IsFinished)
+            {
+                // Nothing left to pour - the glass stays drained while it blinks.
+                return 1d;
+            }
+
+            int segment = SegmentMinutes;
+            return (ElapsedMinutes % segment) / (double)segment;
+        }
+    }
+
+    /// <summary>One pass: apply the idle rule, turn the glass over if due, repaint and relabel.</summary>
     private void Refresh()
     {
         ApplyIdleRule();
         RefreshTheme(force: false);
 
-        double progress = Progress;
-        bool finished = progress >= 1d;
+        bool finished = IsFinished;
+        int segment = ElapsedMinutes / SegmentMinutes;
 
         if (finished && !IsPaused && !_targetAnnounced)
         {
@@ -136,11 +195,97 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
         }
 
+        bool turnOver = FlipEnabled && !finished && !IsPaused && segment != _lastSegment;
+        _lastSegment = segment;
+
+        if (turnOver)
+        {
+            StartFlip();
+            UpdateTooltip(finished);
+            ScheduleNextTick(blinking: false);
+            return;
+        }
+
         bool shouldBlink = finished && !IsPaused && _settings.BlinkWhenFinished;
         _blinkVisible = shouldBlink ? !_blinkVisible : true;
 
-        UpdateIcon(progress, finished);
+        if (!_flipTimer.Enabled)
+        {
+            UpdateIcon(SandProgress, ColorProgress, finished, flipAngle: 0d);
+        }
+
         UpdateTooltip(finished);
+        ScheduleNextTick(shouldBlink);
+    }
+
+    /// <summary>
+    /// Picks when to wake up next. Normally that is the next whole minute of the sitting, so the
+    /// sand level and the turn-over happen on the minute instead of drifting with the timer.
+    /// </summary>
+    private void ScheduleNextTick(bool blinking)
+    {
+        int interval;
+        if (blinking)
+        {
+            interval = BlinkIntervalMilliseconds;
+        }
+        else if (IsPaused)
+        {
+            interval = MinuteMilliseconds;
+        }
+        else
+        {
+            double elapsed = Elapsed.TotalMilliseconds;
+            double nextMinute = (Math.Floor(elapsed / MinuteMilliseconds) + 1d) * MinuteMilliseconds;
+            interval = (int)Math.Clamp(
+                nextMinute - elapsed + TickGuardMilliseconds,
+                TickGuardMilliseconds,
+                MinuteMilliseconds + TickGuardMilliseconds);
+        }
+
+        if (_timer.Interval != interval)
+        {
+            _timer.Interval = interval;
+        }
+    }
+
+    private void StartFlip()
+    {
+        _flipFrame = 0;
+        _flipTimer.Start();
+        DrawFlipFrame();
+    }
+
+    private void OnFlipTick()
+    {
+        _flipFrame++;
+        if (_flipFrame >= FlipFrameCount)
+        {
+            _flipTimer.Stop();
+            _flipFrame = 0;
+            _renderedSignature = string.Empty;
+            Refresh();
+            return;
+        }
+
+        DrawFlipFrame();
+    }
+
+    /// <summary>
+    /// Throughout the turn the glass is drawn drained - empty on top, full below. Turned a full
+    /// half circle that picture is exactly a fresh pour, so the animation joins the next segment
+    /// without a jump.
+    /// </summary>
+    private void DrawFlipFrame()
+    {
+        double angle = 180d * _flipFrame / FlipFrameCount;
+        UpdateIcon(sandProgress: 1d, colorProgress: ColorProgress, finished: false, flipAngle: angle);
+    }
+
+    private void StopFlip()
+    {
+        _flipTimer.Stop();
+        _flipFrame = 0;
     }
 
     private void ApplyIdleRule()
@@ -158,13 +303,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void UpdateIcon(double progress, bool finished)
+    private void UpdateIcon(double sandProgress, double colorProgress, bool finished, double flipAngle)
     {
         int size = TrayIconSize();
 
-        // Quantising the progress keeps the redraw from running when nothing would change on screen.
-        int progressStep = (int)Math.Round(progress * 500d);
-        string signature = $"{size}|{progressStep}|{finished}|{IsPaused}|{_lightBackground}|{_blinkVisible}";
+        // Quantising keeps the redraw from running when nothing would change on screen.
+        int sandStep = (int)Math.Round(sandProgress * 200d);
+        int colorStep = (int)Math.Round(colorProgress * 200d);
+        int angleStep = (int)Math.Round(flipAngle);
+        string signature =
+            $"{size}|{sandStep}|{colorStep}|{angleStep}|{finished}|{IsPaused}|{_lightBackground}|{_blinkVisible}";
         if (signature == _renderedSignature && _currentIcon is not null)
         {
             return;
@@ -173,7 +321,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _renderedSignature = signature;
 
         var state = new HourglassState(
-            Progress: progress,
+            SandProgress: sandProgress,
+            ColorProgress: colorProgress,
+            FlipAngle: flipAngle,
             Finished: finished,
             Paused: IsPaused,
             LightBackground: _lightBackground,
@@ -275,6 +425,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _sitting.Start();
         }
 
+        StopFlip();
+        _lastSegment = 0;
         _targetAnnounced = false;
         _blinkVisible = true;
         _renderedSignature = string.Empty;
@@ -291,6 +443,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _sitting.Stop();
         }
 
+        StopFlip();
         _renderedSignature = string.Empty;
         Refresh();
     }
@@ -350,6 +503,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _intervalItem.DropDownItems.Add(new ToolStripMenuItem("Свой интервал…", null, (_, _) => AskForInterval()));
     }
 
+    private void BuildFlipMenu()
+    {
+        foreach (int minutes in FlipPresets)
+        {
+            _flipItem.DropDownItems.Add(new ToolStripMenuItem(
+                minutes == 0 ? "Без переворота" : $"Каждые {FormatDuration(TimeSpan.FromMinutes(minutes))}",
+                null,
+                (sender, _) => ApplyFlipInterval((int)((ToolStripMenuItem)sender!).Tag!))
+            {
+                Tag = minutes,
+            });
+        }
+    }
+
     private void BuildIdleMenu()
     {
         foreach (int minutes in IdlePresets)
@@ -369,8 +536,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings.TargetMinutes = Math.Clamp(minutes, AppSettings.MinTargetMinutes, AppSettings.MaxTargetMinutes);
         _settings.Save();
         _targetAnnounced = false;
-        _renderedSignature = string.Empty;
+        ResyncSegment();
         Refresh();
+    }
+
+    private void ApplyFlipInterval(int minutes)
+    {
+        _settings.FlipMinutes = Math.Clamp(minutes, 0, AppSettings.MaxTargetMinutes);
+        _settings.Save();
+        ResyncSegment();
+        Refresh();
+    }
+
+    /// <summary>
+    /// Re-reads which pour the sitting is in. Without this, changing an interval would look
+    /// like a segment boundary and set off a turn-over that is not due.
+    /// </summary>
+    private void ResyncSegment()
+    {
+        StopFlip();
+        _lastSegment = ElapsedMinutes / SegmentMinutes;
+        _renderedSignature = string.Empty;
     }
 
     private void ApplyIdleReset(int minutes)
@@ -398,22 +584,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _autostartItem.Checked = Autostart.IsEnabled();
 
         _intervalItem.Text = $"Интервал: {FormatDuration(Target)}";
-        foreach (ToolStripItem item in _intervalItem.DropDownItems)
-        {
-            if (item is ToolStripMenuItem menuItem && menuItem.Tag is int minutes)
-            {
-                menuItem.Checked = minutes == _settings.TargetMinutes;
-            }
-        }
+        CheckPreset(_intervalItem, _settings.TargetMinutes);
+
+        _flipItem.Text = FlipEnabled
+            ? $"Переворот часов: {FormatDuration(TimeSpan.FromMinutes(SegmentMinutes))}"
+            : "Переворот часов: выключен";
+        CheckPreset(_flipItem, _settings.FlipMinutes);
 
         _idleItem.Text = _settings.IdleResetMinutes > 0
             ? $"Сброс при бездействии: {FormatDuration(TimeSpan.FromMinutes(_settings.IdleResetMinutes))}"
             : "Сброс при бездействии: выключен";
-        foreach (ToolStripItem item in _idleItem.DropDownItems)
+        CheckPreset(_idleItem, _settings.IdleResetMinutes);
+    }
+
+    private static void CheckPreset(ToolStripMenuItem parent, int selectedMinutes)
+    {
+        foreach (ToolStripItem item in parent.DropDownItems)
         {
             if (item is ToolStripMenuItem menuItem && menuItem.Tag is int minutes)
             {
-                menuItem.Checked = minutes == _settings.IdleResetMinutes;
+                menuItem.Checked = minutes == selectedMinutes;
             }
         }
     }
@@ -425,7 +615,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
              Timerlight {typeof(TrayApplicationContext).Assembly.GetName().Version?.ToString(3) ?? "1.0.0"}
 
              Песочные часы в трее показывают, сколько вы сидите за компьютером.
-             Цвет песка идёт от зелёного к красному, а в конце интервала значок мигает.
+             Цвет песка идёт от зелёного к красному за весь интервал, сам песок
+             пересыпается за {FormatDuration(TimeSpan.FromMinutes(SegmentMinutes))}, после чего часы переворачиваются.
+             В конце интервала значок мигает.
 
              Щелчок левой кнопкой по значку — начать отсчёт заново.
 
@@ -527,6 +719,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
+            _flipTimer.Stop();
+            _flipTimer.Dispose();
             _timer.Stop();
             _timer.Dispose();
 

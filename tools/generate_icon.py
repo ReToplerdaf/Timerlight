@@ -30,6 +30,9 @@ BOTTOM_CAP = (16.0, 85.5, 84.0, 95.5)
 # The file icon shows an hourglass part-way through, so both bulbs hold sand.
 ICON_PROGRESS = 0.25
 
+# A perfectly edge-on glass would give the transform a zero row, so keep a sliver of height.
+MINIMUM_FLIP_SCALE = 0.04
+
 PLATE_COLOR = (43, 47, 58, 255)
 FRAME_COLOR = (238, 240, 244, 255)
 
@@ -82,14 +85,42 @@ def lower_sand(progress: float) -> list[tuple[float, float]] | None:
     ]
 
 
+def flip(image: Image.Image, angle_degrees: float, scale: float) -> Image.Image:
+    """Squashes the glass vertically about its neck, the way ApplyFlip does in the C# renderer."""
+    factor = math.cos(math.radians(angle_degrees))
+    if abs(factor) < MINIMUM_FLIP_SCALE:
+        factor = MINIMUM_FLIP_SCALE if angle_degrees <= 90.0 else -MINIMUM_FLIP_SCALE
+
+    # PIL's AFFINE matrix maps output pixels back to input pixels, hence the reciprocal.
+    # Integer coordinates address pixel centres here while GDI+ rasterises in continuous space,
+    # so the axis is nudged half a pixel to line a finished half-turn up with a fresh pour.
+    # GDI+ mirrors exactly about y=50 and needs no such nudge.
+    neck = NECK_Y * scale + 0.5
+    return image.transform(
+        image.size,
+        Image.AFFINE,
+        (1.0, 0.0, 0.0, 0.0, 1.0 / factor, neck - neck / factor),
+        resample=Image.BILINEAR,
+    )
+
+
 def render(
     size: int,
     progress: float = ICON_PROGRESS,
+    color_progress: float | None = None,
+    flip_angle: float = 0.0,
     plate: bool = True,
     frame_color: tuple[int, int, int, int] = FRAME_COLOR,
     finished: bool = False,
 ) -> Image.Image:
-    """Draws the hourglass. With `plate` it becomes the file icon; without, the tray icon."""
+    """Draws the hourglass. With `plate` it becomes the file icon; without, the tray icon.
+
+    `progress` sets the sand levels (one pour) and `color_progress` sets the colour (the whole
+    interval); leaving the latter out ties them together, which is what the file icon wants.
+    """
+    if color_progress is None:
+        color_progress = progress
+
     canvas = size * SUPERSAMPLE
     scale = canvas / 100.0
     image = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
@@ -102,9 +133,6 @@ def render(
         left, top, right, bottom = rect
         return [left * scale, top * scale, right * scale, bottom * scale]
 
-    if plate:
-        # Rounded plate, so the icon reads on both light and dark Explorer backgrounds.
-        draw.rounded_rectangle([0, 0, canvas - 1, canvas - 1], radius=22.0 * scale, fill=PLATE_COLOR)
 
     upper_bulb = [(CENTER_X - HALF_BASE_WIDTH, UPPER_BASE_Y),
                   (CENTER_X + HALF_BASE_WIDTH, UPPER_BASE_Y),
@@ -117,7 +145,7 @@ def render(
     draw.polygon(pt(upper_bulb), fill=hollow)
     draw.polygon(pt(lower_bulb), fill=hollow)
 
-    sand = sand_color(progress)
+    sand = sand_color(color_progress)
     top_sand = upper_sand(progress)
     if top_sand:
         draw.polygon(pt(top_sand), fill=sand)
@@ -138,6 +166,17 @@ def render(
 
     draw.rounded_rectangle(box(TOP_CAP), radius=3.5 * scale, fill=frame_color)
     draw.rounded_rectangle(box(BOTTOM_CAP), radius=3.5 * scale, fill=frame_color)
+
+    if flip_angle:
+        image = flip(image, flip_angle, scale)
+
+    if plate:
+        # The plate stays put while the glass turns, so it is laid in underneath afterwards.
+        backdrop = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+        ImageDraw.Draw(backdrop).rounded_rectangle(
+            [0, 0, canvas - 1, canvas - 1], radius=22.0 * scale, fill=PLATE_COLOR)
+        backdrop.alpha_composite(image)
+        image = backdrop
 
     return image.resize((size, size), Image.LANCZOS)
 

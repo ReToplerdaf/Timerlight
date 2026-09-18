@@ -4,16 +4,22 @@ using System.Drawing.Imaging;
 namespace Timerlight;
 
 /// <summary>Everything the renderer needs to know to draw one frame of the tray icon.</summary>
+/// <param name="SandProgress">How far the current pour has got, 0 to 1. Sets the sand levels.</param>
+/// <param name="ColorProgress">How far the whole interval has got, 0 to 1. Sets the colour.</param>
+/// <param name="FlipAngle">0 while the glass stands still, 0 to 180 while it is turned over.</param>
 internal readonly record struct HourglassState(
-    double Progress,
+    double SandProgress,
+    double ColorProgress,
+    double FlipAngle,
     bool Finished,
     bool Paused,
     bool LightBackground,
     float Opacity);
 
 /// <summary>
-/// Draws the hourglass shown in the notification area. The sand drains from the upper
-/// bulb into the lower one as the sitting goes on, and its colour walks from green to red.
+/// Draws the hourglass shown in the notification area. The sand drains from the upper bulb
+/// into the lower one over one pour, its colour walks from green to red over the whole
+/// interval, and the glass can be caught mid-turn between two pours.
 /// </summary>
 internal static class HourglassIconRenderer
 {
@@ -30,6 +36,9 @@ internal static class HourglassIconRenderer
     private const float HalfBaseWidth = 29f;
     private const float BulbHeight = 35.5f;
     private const float GlassStroke = 5.5f;
+
+    // A perfectly edge-on glass would give the transform a zero row, so keep a sliver of height.
+    private const float MinimumFlipScale = 0.04f;
 
     private static readonly PointF[] UpperBulb =
     [
@@ -60,6 +69,12 @@ internal static class HourglassIconRenderer
             graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
             graphics.Clear(Color.Transparent);
             graphics.ScaleTransform(supersampledSize / DesignSize, supersampledSize / DesignSize);
+
+            if (state.FlipAngle != 0d)
+            {
+                ApplyFlip(graphics, state.FlipAngle);
+            }
+
             DrawHourglass(graphics, state);
         }
 
@@ -94,15 +109,35 @@ internal static class HourglassIconRenderer
         return icon;
     }
 
+    /// <summary>
+    /// Turns the glass over by squashing it flat and letting it come back inverted, the way a
+    /// real hourglass swings round its stand. A plain rotation would swing the corners outside
+    /// the icon at 45 degrees; this stays within the square at every angle. The shape is
+    /// symmetric about its neck, so a finished half-turn lands exactly on the mirrored drawing.
+    /// </summary>
+    private static void ApplyFlip(Graphics graphics, double angleDegrees)
+    {
+        float scaleY = (float)Math.Cos(angleDegrees * Math.PI / 180d);
+        if (Math.Abs(scaleY) < MinimumFlipScale)
+        {
+            scaleY = angleDegrees <= 90d ? MinimumFlipScale : -MinimumFlipScale;
+        }
+
+        graphics.TranslateTransform(CenterX, NeckY);
+        graphics.ScaleTransform(1f, scaleY);
+        graphics.TranslateTransform(-CenterX, -NeckY);
+    }
+
     private static void DrawHourglass(Graphics graphics, HourglassState state)
     {
-        double progress = Math.Clamp(state.Progress, 0d, 1d);
+        double sandProgress = Math.Clamp(state.SandProgress, 0d, 1d);
+        double colorProgress = Math.Clamp(state.ColorProgress, 0d, 1d);
 
         Color frame = state.LightBackground
             ? Color.FromArgb(58, 58, 62)     // dark glass on a light taskbar
             : Color.FromArgb(238, 240, 244); // light glass on a dark taskbar
 
-        Color sand = state.Paused ? Color.FromArgb(152, 155, 162) : SandColor(progress);
+        Color sand = state.Paused ? Color.FromArgb(152, 155, 162) : SandColor(colorProgress);
         Color glassOutline = state.Finished && !state.Paused ? sand : frame;
 
         // A faint wash inside the bulbs keeps the silhouette readable at 16 px.
@@ -114,21 +149,21 @@ internal static class HourglassIconRenderer
 
         using (var sandBrush = new SolidBrush(sand))
         {
-            PointF[]? upperSand = BuildUpperSand(progress);
+            PointF[]? upperSand = BuildUpperSand(sandProgress);
             if (upperSand is not null)
             {
                 graphics.FillPolygon(sandBrush, upperSand);
             }
 
-            PointF[]? lowerSand = BuildLowerSand(progress);
+            PointF[]? lowerSand = BuildLowerSand(sandProgress);
             if (lowerSand is not null)
             {
                 graphics.FillPolygon(sandBrush, lowerSand);
             }
 
-            if (!state.Paused && progress > 0.005d && progress < 0.995d)
+            if (!state.Paused && sandProgress > 0.005d && sandProgress < 0.995d)
             {
-                float pileTop = LowerBaseY - LowerSandDepth(progress);
+                float pileTop = LowerBaseY - LowerSandDepth(sandProgress);
                 using var streamPen = new Pen(Color.FromArgb(210, sand), 3f);
                 graphics.DrawLine(streamPen, CenterX, NeckY, CenterX, pileTop);
             }

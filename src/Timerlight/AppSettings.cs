@@ -15,6 +15,12 @@ internal sealed class AppSettings
     /// <summary>How long a sitting may last before the icon starts blinking.</summary>
     public int TargetMinutes { get; set; } = 60;
 
+    /// <summary>
+    /// How long one pour of sand lasts before the glass is turned over, in minutes.
+    /// 0 stretches a single pour across the whole interval and never turns the glass.
+    /// </summary>
+    public int FlipMinutes { get; set; } = 10;
+
     /// <summary>Blink the tray icon once the target has been reached.</summary>
     public bool BlinkWhenFinished { get; set; } = true;
 
@@ -87,6 +93,7 @@ internal sealed class AppSettings
     private void Normalize()
     {
         TargetMinutes = Math.Clamp(TargetMinutes, MinTargetMinutes, MaxTargetMinutes);
+        FlipMinutes = Math.Clamp(FlipMinutes, 0, MaxTargetMinutes);
         IdleResetMinutes = Math.Clamp(IdleResetMinutes, 0, MaxTargetMinutes);
     }
 }
