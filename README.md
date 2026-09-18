@@ -136,3 +136,9 @@ pip install Pillow
 python3 tools/generate_icon.py
 python3 tools/generate_preview.py
 ```
+
+## Что дальше
+
+То, что могло бы появиться в программе, вместе с причинами, собрано в
+[`docs/ideas.md`](docs/ideas.md). Это не план работ, а копилка идей: оттуда они
+уходят в issues и в код.
