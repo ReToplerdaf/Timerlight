@@ -26,8 +26,6 @@ SEGMENT_MINUTES = 10
 
 DARK_TASKBAR = (32, 32, 32)
 LIGHT_TASKBAR = (243, 243, 243)
-DARK_FRAME = (58, 58, 62, 255)     # glass colour used on a light taskbar
-LIGHT_FRAME = (238, 240, 244, 255) # glass colour used on a dark taskbar
 
 # Minutes chosen so the sand level and the colour never coincide - they are separate clocks.
 MINUTE_COLUMNS = [0, 5, 14, 27, 43, 60]
@@ -59,7 +57,7 @@ def magnify(icon: Image.Image, opacity: float = 1.0) -> Image.Image:
     return icon.resize((size, size), Image.NEAREST)
 
 
-def minute_frames(frame: tuple[int, int, int, int]) -> list[tuple[Image.Image, str]]:
+def minute_frames(light_background: bool) -> list[tuple[Image.Image, str]]:
     """The icon at each sample minute, plus the dim half of the blink at the end."""
     frames = []
     for minutes in MINUTE_COLUMNS:
@@ -67,22 +65,22 @@ def minute_frames(frame: tuple[int, int, int, int]) -> list[tuple[Image.Image, s
         sand = 1.0 if finished else (minutes % SEGMENT_MINUTES) / SEGMENT_MINUTES
         color = min(1.0, minutes / TARGET_MINUTES)
         icon = render(TRAY_SIZE, progress=sand, color_progress=color,
-                      plate=False, frame_color=frame, finished=finished)
+                      plate=False, light_background=light_background, finished=finished)
         frames.append((magnify(icon), f"{minutes} мин"))
 
     blinking = render(TRAY_SIZE, progress=1.0, color_progress=1.0,
-                      plate=False, frame_color=frame, finished=True)
+                      plate=False, light_background=light_background, finished=True)
     frames.append((magnify(blinking, opacity=0.22), "мигает"))
     return frames
 
 
-def flip_frames(frame: tuple[int, int, int, int]) -> list[tuple[Image.Image, str]]:
+def flip_frames(light_background: bool) -> list[tuple[Image.Image, str]]:
     """The turn-over: drained glass swinging round to become a fresh pour."""
     color = SEGMENT_MINUTES / TARGET_MINUTES
     frames = []
     for index, angle in enumerate(FLIP_ANGLES):
         icon = render(TRAY_SIZE, progress=1.0, color_progress=color,
-                      flip_angle=float(angle), plate=False, frame_color=frame)
+                      flip_angle=float(angle), plate=False, light_background=light_background)
         if index == 0:
             caption = "песок внизу"
         elif index == len(FLIP_ANGLES) - 1:
@@ -129,13 +127,13 @@ def main() -> None:
 
     draw_panel(image, 0, DARK_TASKBAR,
                "Цвет — за весь час, песок — за десять минут (тёмная панель задач)",
-               minute_frames(LIGHT_FRAME), font, caption_font)
+               minute_frames(light_background=False), font, caption_font)
     draw_panel(image, panel_height, LIGHT_TASKBAR,
                "То же самое на светлой панели задач",
-               minute_frames(DARK_FRAME), font, caption_font)
+               minute_frames(light_background=True), font, caption_font)
     draw_panel(image, panel_height * 2, DARK_TASKBAR,
                "Переворот: каждые 10 минут, полсекунды",
-               flip_frames(LIGHT_FRAME), font, caption_font)
+               flip_frames(light_background=False), font, caption_font)
 
     target = Path(__file__).resolve().parent.parent / "docs" / "preview.png"
     target.parent.mkdir(parents=True, exist_ok=True)

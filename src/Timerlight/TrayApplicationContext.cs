@@ -33,6 +33,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private static readonly int[] IntervalPresets = [15, 30, 45, 60, 90, 120];
     private static readonly int[] FlipPresets = [0, 5, 10, 15, 20, 30];
     private static readonly int[] IdlePresets = [0, 5, 10, 15, 30];
+    private static readonly int[] AutoResetPresets = [0, 3, 5, 10, 15];
     private static readonly TimeSpan ThemeRefreshInterval = TimeSpan.FromSeconds(20);
 
     private readonly AppSettings _settings;
@@ -46,6 +47,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _intervalItem;
     private readonly ToolStripMenuItem _flipItem;
     private readonly ToolStripMenuItem _idleItem;
+    private readonly ToolStripMenuItem _autoResetItem;
     private readonly ToolStripMenuItem _blinkItem;
     private readonly ToolStripMenuItem _notificationItem;
     private readonly ToolStripMenuItem _resetOnUnlockItem;
@@ -77,6 +79,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _intervalItem = new ToolStripMenuItem("Интервал");
         _flipItem = new ToolStripMenuItem("Переворот часов");
         _idleItem = new ToolStripMenuItem("Сброс при бездействии");
+        _autoResetItem = new ToolStripMenuItem("Автосброс после сигнала");
         _blinkItem = new ToolStripMenuItem("Мигать по достижении", null, (_, _) => ToggleBlink());
         _notificationItem = new ToolStripMenuItem("Показывать уведомление", null, (_, _) => ToggleNotification());
         _resetOnUnlockItem = new ToolStripMenuItem("Сбрасывать после разблокировки", null, (_, _) => ToggleResetOnUnlock());
@@ -86,6 +89,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         BuildIntervalMenu();
         BuildFlipMenu();
         BuildIdleMenu();
+        BuildAutoResetMenu();
 
         var resetItem = new ToolStripMenuItem("Сбросить таймер", null, (_, _) => ResetSitting())
         {
@@ -101,6 +105,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _intervalItem,
             _flipItem,
             _idleItem,
+            _autoResetItem,
             new ToolStripSeparator(),
             _blinkItem,
             _notificationItem,
@@ -177,10 +182,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>Whether the finished interval restarts by itself after the break.</summary>
+    private bool AutoResetEnabled => _settings.AutoResetMinutes > 0;
+
+    /// <summary>Whole minutes left of the break before the count restarts on its own.</summary>
+    private int AutoResetMinutesLeft =>
+        Math.Max(0, TargetMinutes + _settings.AutoResetMinutes - ElapsedMinutes);
+
     /// <summary>One pass: apply the idle rule, turn the glass over if due, repaint and relabel.</summary>
     private void Refresh()
     {
         ApplyIdleRule();
+        ApplyAutoResetRule();
         RefreshTheme(force: false);
 
         bool finished = IsFinished;
@@ -288,6 +301,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _flipFrame = 0;
     }
 
+    /// <summary>
+    /// Ends the break on its own. The icon signals for as long as the break is meant to last
+    /// and then starts the next interval, so a sitting that is simply ignored still rolls
+    /// over instead of blinking all afternoon. Clicking the icon cuts the break short.
+    /// </summary>
+    private void ApplyAutoResetRule()
+    {
+        if (!AutoResetEnabled || IsPaused)
+        {
+            return;
+        }
+
+        if (ElapsedMinutes >= TargetMinutes + _settings.AutoResetMinutes)
+        {
+            ResetSittingCore();
+        }
+    }
+
     private void ApplyIdleRule()
     {
         if (_settings.IdleResetMinutes <= 0 || IsPaused)
@@ -366,6 +397,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             text = $"Пауза · {FormatDuration(Elapsed)} из {FormatDuration(Target)}";
         }
+        else if (finished && AutoResetEnabled)
+        {
+            text = $"Пора размяться · сброс через {FormatDuration(TimeSpan.FromMinutes(AutoResetMinutesLeft))}";
+        }
         else if (finished)
         {
             TimeSpan over = Elapsed - Target;
@@ -391,10 +426,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void AnnounceTarget()
     {
+        string advice = AutoResetEnabled
+            ? $"Пора размяться — отсчёт начнётся заново через {FormatDuration(TimeSpan.FromMinutes(_settings.AutoResetMinutes))} или сразу по щелчку значка."
+            : "Пора размяться — щёлкните по значку, чтобы начать отсчёт заново.";
+
         _notifyIcon.ShowBalloonTip(
             10_000,
             "Timerlight",
-            $"Вы за компьютером уже {FormatDuration(Elapsed)}. Пора размяться — щёлкните по значку, чтобы начать отсчёт заново.",
+            $"Вы за компьютером уже {FormatDuration(Elapsed)}. {advice}",
             ToolTipIcon.Info);
     }
 
@@ -531,6 +570,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void BuildAutoResetMenu()
+    {
+        foreach (int minutes in AutoResetPresets)
+        {
+            _autoResetItem.DropDownItems.Add(new ToolStripMenuItem(
+                minutes == 0 ? "Только по щелчку" : $"Через {FormatDuration(TimeSpan.FromMinutes(minutes))}",
+                null,
+                (sender, _) => ApplyAutoReset((int)((ToolStripMenuItem)sender!).Tag!))
+            {
+                Tag = minutes,
+            });
+        }
+    }
+
     private void ApplyInterval(int minutes)
     {
         _settings.TargetMinutes = Math.Clamp(minutes, AppSettings.MinTargetMinutes, AppSettings.MaxTargetMinutes);
@@ -565,6 +618,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings.Save();
     }
 
+    private void ApplyAutoReset(int minutes)
+    {
+        _settings.AutoResetMinutes = Math.Clamp(minutes, 0, AppSettings.MaxTargetMinutes);
+        _settings.Save();
+
+        // A shorter break may already be over, and the tooltip counts down either way.
+        _renderedSignature = string.Empty;
+        Refresh();
+    }
+
     private void AskForInterval()
     {
         using var dialog = new CustomIntervalForm(_settings.TargetMinutes);
@@ -595,6 +658,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ? $"Сброс при бездействии: {FormatDuration(TimeSpan.FromMinutes(_settings.IdleResetMinutes))}"
             : "Сброс при бездействии: выключен";
         CheckPreset(_idleItem, _settings.IdleResetMinutes);
+
+        _autoResetItem.Text = AutoResetEnabled
+            ? $"Автосброс после сигнала: {FormatDuration(TimeSpan.FromMinutes(_settings.AutoResetMinutes))}"
+            : "Автосброс после сигнала: только по щелчку";
+        CheckPreset(_autoResetItem, _settings.AutoResetMinutes);
     }
 
     private static void CheckPreset(ToolStripMenuItem parent, int selectedMinutes)

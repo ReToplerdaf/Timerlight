@@ -24,6 +24,13 @@ internal sealed class AppSettings
     /// <summary>Blink the tray icon once the target has been reached.</summary>
     public bool BlinkWhenFinished { get; set; } = true;
 
+    /// <summary>
+    /// How long the icon signals the finished interval before the count restarts by itself,
+    /// in minutes - the length of the break being asked for. 0 leaves it signalling until
+    /// the icon is clicked.
+    /// </summary>
+    public int AutoResetMinutes { get; set; } = 5;
+
     /// <summary>Show a Windows notification once per cycle when the target is reached.</summary>
     public bool ShowNotification { get; set; } = true;
 
@@ -94,6 +101,7 @@ internal sealed class AppSettings
     {
         TargetMinutes = Math.Clamp(TargetMinutes, MinTargetMinutes, MaxTargetMinutes);
         FlipMinutes = Math.Clamp(FlipMinutes, 0, MaxTargetMinutes);
+        AutoResetMinutes = Math.Clamp(AutoResetMinutes, 0, MaxTargetMinutes);
         IdleResetMinutes = Math.Clamp(IdleResetMinutes, 0, MaxTargetMinutes);
     }
 }

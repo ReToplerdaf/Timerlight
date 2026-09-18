@@ -23,7 +23,7 @@ UPPER_BASE_Y = 14.5
 LOWER_BASE_Y = 85.5
 HALF_BASE_WIDTH = 29.0
 BULB_HEIGHT = 35.5
-GLASS_STROKE = 5.5
+GLASS_STROKE = 6.5
 TOP_CAP = (16.0, 4.5, 84.0, 14.5)
 BOTTOM_CAP = (16.0, 85.5, 84.0, 95.5)
 
@@ -34,27 +34,59 @@ ICON_PROGRESS = 0.25
 MINIMUM_FLIP_SCALE = 0.04
 
 PLATE_COLOR = (43, 47, 58, 255)
-FRAME_COLOR = (238, 240, 244, 255)
+
+# Only the stand is neutral; the glass walls take the colour, so the whole icon reads as one
+# signal. These are the two stand colours, picked from the taskbar theme.
+FRAME_ON_DARK = (238, 240, 244, 255)
+FRAME_ON_LIGHT = (58, 58, 62, 255)
+
+# How strongly the empty part of the glass is tinted with the accent.
+GLASS_WASH_ALPHA = 34
+FINISHED_WASH_ALPHA = 76
+
+# Relative luminance the glass is held at on a light taskbar - about 3.5:1 against it.
+LIGHT_BACKGROUND_LUMINANCE = 0.22
 
 SUPERSAMPLE = 8
 SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 PNG_FROM_SIZE = 128  # smaller entries are stored as BMP, which every shell understands
 
 
-def sand_color(progress: float) -> tuple[int, int, int, int]:
-    """Same green-to-red ramp as SandColor() in the C# renderer."""
-    hue = 120.0 * math.pow(1.0 - progress, 1.25)
-    value = 0.80 + 0.15 * progress
-    saturation = 0.92
-
-    chroma = value * saturation
+def hue_triple(hue: float) -> tuple[float, float, float]:
+    """The hue on its own, at full saturation and value - HueTriple() in the C# renderer."""
     sector = max(0.0, min(360.0, hue)) / 60.0
-    x = chroma * (1.0 - abs((sector % 2.0) - 1.0))
+    x = 1.0 - abs((sector % 2.0) - 1.0)
+    table = [(1.0, x, 0.0), (x, 1.0, 0.0), (0.0, 1.0, x),
+             (0.0, x, 1.0), (x, 0.0, 1.0), (1.0, 0.0, x)]
+    return table[int(sector) % 6]
+
+
+def encode_srgb(linear: float) -> int:
+    clamped = max(0.0, min(1.0, linear))
+    encoded = clamped * 12.92 if clamped <= 0.0031308 else 1.055 * clamped ** (1 / 2.4) - 0.055
+    return round(encoded * 255)
+
+
+def accent_color(progress: float, light_background: bool = False) -> tuple[int, int, int, int]:
+    """Same green-to-red ramp as AccentColor() in the C# renderer.
+
+    A dark taskbar takes the hue straight. A light one cannot: yellow carries nearly four
+    times the luminance of red at the same HSV value, so the middle of the ramp washes out.
+    There the colour is held at a fixed linear luminance instead.
+    """
+    hue = 120.0 * math.pow(1.0 - progress, 1.25)
+    r, g, b = hue_triple(hue)
+
+    if light_background:
+        weight = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        scale = min(LIGHT_BACKGROUND_LUMINANCE / weight, 1.0)
+        return (encode_srgb(r * scale), encode_srgb(g * scale), encode_srgb(b * scale), 255)
+
+    value, saturation = 0.84 + 0.14 * progress, 0.90
+    chroma = value * saturation
     m = value - chroma
-    table = [(chroma, x, 0.0), (x, chroma, 0.0), (0.0, chroma, x),
-             (0.0, x, chroma), (x, 0.0, chroma), (chroma, 0.0, x)]
-    r, g, b = table[int(sector) % 6]
-    return (round((r + m) * 255), round((g + m) * 255), round((b + m) * 255), 255)
+    return (round((r * chroma + m) * 255), round((g * chroma + m) * 255),
+            round((b * chroma + m) * 255), 255)
 
 
 def upper_sand(progress: float) -> list[tuple[float, float]] | None:
@@ -110,7 +142,7 @@ def render(
     color_progress: float | None = None,
     flip_angle: float = 0.0,
     plate: bool = True,
-    frame_color: tuple[int, int, int, int] = FRAME_COLOR,
+    light_background: bool = False,
     finished: bool = False,
 ) -> Image.Image:
     """Draws the hourglass. With `plate` it becomes the file icon; without, the tray icon.
@@ -141,11 +173,14 @@ def render(
                   (CENTER_X + HALF_BASE_WIDTH, LOWER_BASE_Y),
                   (CENTER_X, NECK_Y)]
 
-    hollow = (frame_color[0], frame_color[1], frame_color[2], 46)
+    frame_color = FRAME_ON_LIGHT if light_background else FRAME_ON_DARK
+    sand = accent_color(color_progress, light_background)
+
+    wash_alpha = FINISHED_WASH_ALPHA if finished else GLASS_WASH_ALPHA
+    hollow = (sand[0], sand[1], sand[2], wash_alpha)
     draw.polygon(pt(upper_bulb), fill=hollow)
     draw.polygon(pt(lower_bulb), fill=hollow)
 
-    sand = sand_color(color_progress)
     top_sand = upper_sand(progress)
     if top_sand:
         draw.polygon(pt(top_sand), fill=sand)
@@ -160,9 +195,8 @@ def render(
                   fill=stream, width=max(1, round(3.0 * scale)))
 
     stroke = max(1, round(GLASS_STROKE * scale))
-    outline = sand if finished else frame_color
     for bulb in (upper_bulb, lower_bulb):
-        draw.line(pt(bulb + [bulb[0]]), fill=outline, width=stroke, joint="curve")
+        draw.line(pt(bulb + [bulb[0]]), fill=sand, width=stroke, joint="curve")
 
     draw.rounded_rectangle(box(TOP_CAP), radius=3.5 * scale, fill=frame_color)
     draw.rounded_rectangle(box(BOTTOM_CAP), radius=3.5 * scale, fill=frame_color)

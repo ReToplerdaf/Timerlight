@@ -35,10 +35,20 @@ internal static class HourglassIconRenderer
     private const float LowerBaseY = 85.5f;
     private const float HalfBaseWidth = 29f;
     private const float BulbHeight = 35.5f;
-    private const float GlassStroke = 5.5f;
+    private const float GlassStroke = 6.5f;
+
+    // The glass body is tinted with the same colour as its walls - enough to bind the shape
+    // together, not enough to blur where the sand ends. The hour itself gets a stronger wash.
+    private const int GlassWashAlpha = 34;
+    private const int FinishedWashAlpha = 76;
+    private const int NeutralWashAlpha = 46;
 
     // A perfectly edge-on glass would give the transform a zero row, so keep a sliver of height.
     private const float MinimumFlipScale = 0.04f;
+
+    // Relative luminance the glass is held at on a light taskbar. Against Windows' own light
+    // taskbar this is a contrast ratio of about 3.5:1 at every point of the ramp.
+    private const double LightBackgroundLuminance = 0.22d;
 
     private static readonly PointF[] UpperBulb =
     [
@@ -134,14 +144,21 @@ internal static class HourglassIconRenderer
         double colorProgress = Math.Clamp(state.ColorProgress, 0d, 1d);
 
         Color frame = state.LightBackground
-            ? Color.FromArgb(58, 58, 62)     // dark glass on a light taskbar
-            : Color.FromArgb(238, 240, 244); // light glass on a dark taskbar
+            ? Color.FromArgb(58, 58, 62)     // dark stand on a light taskbar
+            : Color.FromArgb(238, 240, 244); // light stand on a dark taskbar
 
-        Color sand = state.Paused ? Color.FromArgb(152, 155, 162) : SandColor(colorProgress);
-        Color glassOutline = state.Finished && !state.Paused ? sand : frame;
+        // Only the stand stays neutral. The glass carries the colour too, so the whole icon
+        // reads as one green-to-red signal rather than a white shape with a coloured speck in
+        // it - at 16 px a speck of green or amber simply does not register. A paused timer
+        // drops back to the neutral glass, which is what marks it as stopped.
+        Color sand = state.Paused ? Color.FromArgb(152, 155, 162) : AccentColor(colorProgress, state.LightBackground);
+        Color glassOutline = state.Paused ? frame : sand;
 
-        // A faint wash inside the bulbs keeps the silhouette readable at 16 px.
-        using (var hollowBrush = new SolidBrush(Color.FromArgb(46, frame)))
+        int washAlpha = state.Paused
+            ? NeutralWashAlpha
+            : state.Finished ? FinishedWashAlpha : GlassWashAlpha;
+
+        using (var hollowBrush = new SolidBrush(Color.FromArgb(washAlpha, glassOutline)))
         {
             graphics.FillPolygon(hollowBrush, UpperBulb);
             graphics.FillPolygon(hollowBrush, LowerBulb);
@@ -235,34 +252,74 @@ internal static class HourglassIconRenderer
     }
 
     /// <summary>Walks the hue from green through amber to red as the sitting wears on.</summary>
-    private static Color SandColor(double progress)
+    private static Color AccentColor(double progress, bool lightBackground)
     {
         double hue = 120d * Math.Pow(1d - progress, 1.25d);
-        double value = 0.80d + (0.15d * progress);
-        return FromHsv(hue, 0.92d, value);
+
+        // A dark taskbar takes the hue straight - bright and saturated is what reads there,
+        // and even the red end of the ramp measures better than 4:1 against it.
+        if (!lightBackground)
+        {
+            return FromHsv(hue, 0.90d, 0.84d + (0.14d * progress));
+        }
+
+        // A light taskbar is the awkward one. Yellow carries nearly four times the luminance
+        // of red at the same HSV value, so one value ramp always leaves the middle of the
+        // walk washed out - which is exactly where the hour spends its second quarter. Hold
+        // the luminance fixed instead and let each hue pay whatever value that costs.
+        return FromLinearLuminance(hue, LightBackgroundLuminance);
+    }
+
+    /// <summary>
+    /// Takes a fully saturated hue and scales it, in linear light, until it carries the
+    /// requested relative luminance. Hues bright enough already are left at full strength.
+    /// </summary>
+    private static Color FromLinearLuminance(double hue, double luminance)
+    {
+        (double r, double g, double b) = HueTriple(hue);
+        double weight = (0.2126d * r) + (0.7152d * g) + (0.0722d * b);
+        double scale = Math.Min(luminance / weight, 1d);
+
+        return Color.FromArgb(EncodeSrgb(r * scale), EncodeSrgb(g * scale), EncodeSrgb(b * scale));
+    }
+
+    private static int EncodeSrgb(double linear)
+    {
+        double clamped = Math.Clamp(linear, 0d, 1d);
+        double encoded = clamped <= 0.0031308d
+            ? clamped * 12.92d
+            : (1.055d * Math.Pow(clamped, 1d / 2.4d)) - 0.055d;
+
+        return (int)Math.Round(encoded * 255d);
+    }
+
+    /// <summary>The hue on its own, at full saturation and value.</summary>
+    private static (double R, double G, double B) HueTriple(double hue)
+    {
+        double sector = Math.Clamp(hue, 0d, 360d) / 60d;
+        double x = 1d - Math.Abs((sector % 2d) - 1d);
+
+        return (int)sector switch
+        {
+            0 => (1d, x, 0d),
+            1 => (x, 1d, 0d),
+            2 => (0d, 1d, x),
+            3 => (0d, x, 1d),
+            4 => (x, 0d, 1d),
+            _ => (1d, 0d, x),
+        };
     }
 
     private static Color FromHsv(double hue, double saturation, double value)
     {
         double chroma = value * saturation;
-        double sector = Math.Clamp(hue, 0d, 360d) / 60d;
-        double x = chroma * (1d - Math.Abs((sector % 2d) - 1d));
         double m = value - chroma;
-
-        (double r, double g, double b) = (int)sector switch
-        {
-            0 => (chroma, x, 0d),
-            1 => (x, chroma, 0d),
-            2 => (0d, chroma, x),
-            3 => (0d, x, chroma),
-            4 => (x, 0d, chroma),
-            _ => (chroma, 0d, x),
-        };
+        (double r, double g, double b) = HueTriple(hue);
 
         return Color.FromArgb(
-            (int)Math.Round((r + m) * 255d),
-            (int)Math.Round((g + m) * 255d),
-            (int)Math.Round((b + m) * 255d));
+            (int)Math.Round(((r * chroma) + m) * 255d),
+            (int)Math.Round(((g * chroma) + m) * 255d),
+            (int)Math.Round(((b * chroma) + m) * 255d));
     }
 
     private static void FillRoundedRectangle(Graphics graphics, Brush brush, RectangleF bounds, float radius)
