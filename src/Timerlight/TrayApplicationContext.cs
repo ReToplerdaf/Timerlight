@@ -612,7 +612,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         MessageBox.Show(
             $"""
-             Timerlight {typeof(TrayApplicationContext).Assembly.GetName().Version?.ToString(3) ?? "1.0.0"}
+             Timerlight {typeof(TrayApplicationContext).Assembly.GetName().Version?.ToString(3) ?? "0.2.0"}
 
              Песочные часы в трее показывают, сколько вы сидите за компьютером.
              Цвет песка идёт от зелёного к красному за весь интервал, сам песок

@@ -13,7 +13,7 @@
     <Product>Timerlight</Product>
     <AssemblyTitle>Timerlight</AssemblyTitle>
     <Description>Tray hourglass that shows how long you have been sitting at the computer.</Description>
-    <Version>1.0.0</Version>
+    <Version>0.2.0</Version>
     <ApplicationIcon>Assets\timerlight.ico</ApplicationIcon>
 
     <!-- Lets the project be built from Linux/macOS CI as well as from Windows. -->
