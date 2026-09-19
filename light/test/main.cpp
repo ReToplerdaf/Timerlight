@@ -12,7 +12,12 @@ static void ok(const char* name, bool cond, const string& detail="") {
   printf("%s  %-60s %s\n", cond?"[ OK ]":"[FAIL]", name, detail.c_str());
   if (!cond) failures++;
 }
-static void allInactive() { for (int i=0;i<24;i++) simPin[i]=HIGH; }
+// «Спокойное» состояние входов. Для багажника оно зависит от
+// TRUNK_ACTIVE_LEVEL: при активном HIGH вход в покое лежит на LOW.
+static void allInactive() {
+  for (int i=0;i<24;i++) simPin[i]=HIGH;
+  simPin[PIN_TRUNK] = (TRUNK_ACTIVE_LEVEL==LOW) ? HIGH : LOW;
+}
 static void resetAll() {
   allInactive(); simPinHook=0; simAutoTick=0;
   // дать антидребезгу отпустить входы предыдущего теста
@@ -181,6 +186,11 @@ int main() {
   ok("габарит+поворот -> поворот", currentMode==MODE_LEFT, "");
   resetAll(); simPin[PIN_TRUNK]=TRUNK_ACTIVE_LEVEL; simPin[PIN_GABARIT]=LOW; step(200);
   ok("багажник+габарит -> багажник", currentMode==MODE_TRUNK, "");
+  // усл. 5.1 принят по HIGH: закрытый багажник должен держать D6 на массе
+  resetAll(); simPin[PIN_TRUNK] = (TRUNK_ACTIVE_LEVEL==LOW)?HIGH:LOW;
+  simPin[PIN_GABARIT]=LOW; step(400);
+  ok("закрытый багажник (D6 в покое) не перебивает габариты",
+     currentMode==MODE_GABARIT && litCount()==144 && leds[0].r==102, rgb(leds[0]));
   resetAll(); simPin[PIN_LEFT]=LOW; step(120); simPin[PIN_LEFT]=HIGH; step(25);
   ok("поворот выключен -> гаснет мгновенно", litCount()==0, to_string(litCount()));
   resetAll(); simPin[PIN_GABARIT]=LOW; step(400); simPin[PIN_BRAKE]=LOW; step(200);
