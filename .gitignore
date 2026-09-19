@@ -10,3 +10,4 @@ publish/
 __pycache__/
 *.pyc
 light/test/sim
+light/.build/
